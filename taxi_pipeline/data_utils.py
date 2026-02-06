@@ -1,40 +1,23 @@
-"""Data acquisition: download real NYC taxi data or generate synthetic fallback."""
-
 from __future__ import annotations
 
 import calendar
-import logging
 import os
 import subprocess
 
 import numpy as np
 import polars as pl
 
-logger = logging.getLogger("TaxiPipeline")
-
 _BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-{}.parquet"
 
 
 def download_data(months: list[str], dest_dir: str = ".") -> list[str]:
-    """Download NYC taxi parquet files if they do not already exist.
-
-    Args:
-        months: List of month strings like ['01', '02', ...].
-        dest_dir: Directory to save files.
-
-    Returns:
-        List of local file paths.
-    """
     paths: list[str] = []
     for month in months:
         filename = f"yellow_tripdata_2023-{month}.parquet"
         filepath = os.path.join(dest_dir, filename)
         if not os.path.exists(filepath):
             url = _BASE_URL.format(month)
-            logger.info("Downloading %s ...", filename)
             subprocess.run(["wget", "-q", url, "-O", filepath], check=True)
-        else:
-            logger.info("File exists: %s", filename)
         paths.append(filepath)
     return paths
 
@@ -45,19 +28,6 @@ def generate_synthetic_data(
     rows_per_month: int = 100_000,
     seed: int = 42,
 ) -> list[str]:
-    """Generate synthetic taxi data matching the real NYC schema.
-
-    Used when real data is unavailable (e.g. no network access).
-
-    Args:
-        months: List of month strings like ['01', '02', ...].
-        dest_dir: Directory to write parquet files.
-        rows_per_month: Number of rows per month file.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        List of generated file paths.
-    """
     rng = np.random.default_rng(seed)
     paths: list[str] = []
     location_ids = list(range(1, 264))
@@ -68,7 +38,6 @@ def generate_synthetic_data(
         days_in_month = calendar.monthrange(year, month)[1]
         n = rows_per_month
 
-        # Pickup timestamps
         day_offsets = rng.integers(0, days_in_month, size=n)
         hour_probs = np.array([
             0.02, 0.015, 0.01, 0.008, 0.007, 0.01, 0.025, 0.05,
@@ -89,26 +58,21 @@ def generate_synthetic_data(
             + second_offsets.astype("timedelta64[s]")
         )
 
-        # Trip distance (lognormal, ~3 miles mean)
         trip_distance = rng.lognormal(mean=1.0, sigma=0.7, size=n).clip(0.1, 80)
 
-        # Duration correlated with distance
         base_speed_mph = rng.normal(12, 4, size=n).clip(3, 40)
         duration_seconds = ((trip_distance / base_speed_mph) * 3600).astype(int).clip(60, 7200)
         dropoffs = pickups + duration_seconds.astype("timedelta64[s]")
 
-        # Fare: base + per-mile + noise
         fare_amount = 3.50 + 2.50 * trip_distance + rng.normal(0, 1.5, size=n)
         fare_amount = fare_amount.clip(2.5, 300)
 
-        # Inject anomalies for cleaning tests (~2%)
         anomaly_idx = rng.choice(n, size=int(n * 0.02), replace=False)
         half = len(anomaly_idx) // 2
         fare_amount[anomaly_idx[:half]] = rng.uniform(-50, -0.01, size=half)
         trip_distance_arr = trip_distance.copy()
         trip_distance_arr[anomaly_idx[half:]] = 0.0
 
-        # Categorical columns
         passenger_count = rng.choice(
             [0, 1, 2, 3, 4, 5, 6, 11], size=n,
             p=[0.01, 0.70, 0.12, 0.06, 0.04, 0.03, 0.03, 0.01],
@@ -122,7 +86,6 @@ def generate_synthetic_data(
             p=[0.9, 0.04, 0.02, 0.02, 0.01, 0.01],
         ).astype(np.float64)
 
-        # Surcharges
         extra = rng.choice([0.0, 0.5, 1.0, 2.5], size=n, p=[0.3, 0.3, 0.2, 0.2])
         mta_tax = np.full(n, 0.5)
         tip_upper = np.maximum(fare_amount * 0.3, 0.01)
@@ -159,7 +122,6 @@ def generate_synthetic_data(
             "airport_fee": airport_fee,
         })
 
-        # Inject nulls (~2.3%) in nullable columns
         null_idx = rng.choice(n, size=int(n * 0.023), replace=False)
         mask = pl.Series("mask", np.isin(np.arange(n), null_idx))
         df = df.with_columns([
@@ -172,36 +134,23 @@ def generate_synthetic_data(
         df = df.sort("tpep_pickup_datetime")
         filepath = os.path.join(dest_dir, f"yellow_tripdata_2023-{month_str}.parquet")
         df.write_parquet(filepath)
-        logger.info("Generated synthetic %s (%d rows)", filepath, n)
         paths.append(filepath)
 
     return paths
 
 
 def resolve_data(months: list[str], dest_dir: str = ".") -> list[str]:
-    """Get data file paths -- download if possible, otherwise generate synthetic.
-
-    Args:
-        months: List of month strings.
-        dest_dir: Target directory.
-
-    Returns:
-        List of parquet file paths.
-    """
     all_exist = all(
         os.path.exists(os.path.join(dest_dir, f"yellow_tripdata_2023-{m}.parquet"))
         for m in months
     )
     if all_exist:
-        paths = [
+        return [
             os.path.join(dest_dir, f"yellow_tripdata_2023-{m}.parquet")
             for m in months
         ]
-        logger.info("All %d data files found locally", len(paths))
-        return paths
 
     try:
         return download_data(months, dest_dir)
-    except Exception as exc:
-        logger.warning("Download failed (%s), generating synthetic data", exc)
+    except Exception:
         return generate_synthetic_data(months, dest_dir)

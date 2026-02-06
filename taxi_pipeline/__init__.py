@@ -1,5 +1,3 @@
-"""NYC Taxi fare prediction pipeline."""
-
 from taxi_pipeline.config import Config
 from taxi_pipeline.data_processor import DataProcessor
 from taxi_pipeline.splitter import TimeSplitter

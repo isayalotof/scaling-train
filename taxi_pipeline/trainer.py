@@ -1,9 +1,6 @@
-"""Two-stage LightGBM model training with Optuna tuning."""
-
 from __future__ import annotations
 
 import json
-import logging
 import pickle
 import subprocess
 from dataclasses import asdict
@@ -19,35 +16,14 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from taxi_pipeline.config import Config
 from taxi_pipeline.splitter import TimeSplitter
 
-logger = logging.getLogger("TaxiPipeline")
-
 
 class ModelTrainer:
-    """Two-stage LightGBM trainer with Optuna hyperparameter search.
-
-    Stage 1: tune on a subsample with pruning.
-    Stage 2: retrain on full training data with best params.
-
-    Args:
-        config: Pipeline configuration.
-    """
-
     def __init__(self, config: Config) -> None:
         self._config = config
-
-    # -- helpers -------------------------------------------------------------
 
     def _prepare_arrays(
         self, df: pl.DataFrame
     ) -> tuple[Any, np.ndarray, list[str]]:
-        """Extract feature DataFrame and target vector.
-
-        Args:
-            df: DataFrame with feature and target columns.
-
-        Returns:
-            (X_pandas, y_numpy, feature_names) tuple.
-        """
         available_features = [
             c for c in self._config.feature_columns if c in df.columns
         ]
@@ -56,41 +32,22 @@ class ModelTrainer:
         return X, y, available_features
 
     def _detect_gpu(self) -> str:
-        """Return 'gpu' if a CUDA device is available, else 'cpu'."""
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
-                logger.info("GPU detected: %s", result.stdout.strip().split("\n")[0])
                 return "gpu"
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-        logger.info("No GPU detected, using CPU")
         return "cpu"
-
-    # -- Stage 1 -------------------------------------------------------------
 
     def tune_hyperparameters(
         self, train_df: pl.DataFrame, splitter: TimeSplitter
     ) -> dict[str, Any]:
-        """Stage 1: Optuna search on a data subsample.
-
-        Args:
-            train_df: Training DataFrame (sorted by time, excluding holdout).
-            splitter: TimeSplitter instance for CV strategy.
-
-        Returns:
-            Best hyperparameter dict found by Optuna.
-        """
         sample_size = int(train_df.height * self._config.tuning_sample_fraction)
         sample_df = train_df.head(sample_size)
-        logger.info(
-            "Stage 1: tuning on %d rows (%.0f%% of train)",
-            sample_df.height,
-            self._config.tuning_sample_fraction * 100,
-        )
 
         X_sample, y_sample, _ = self._prepare_arrays(sample_df)
         tscv = splitter.get_cv_splits(X_sample.shape[0])
@@ -134,10 +91,6 @@ class ModelTrainer:
                 y_pred = model.predict(X_val)
                 fold_rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
                 rmse_scores.append(fold_rmse)
-                logger.info(
-                    "Trial %d, Fold %d: RMSE=%.4f",
-                    trial.number, fold_idx, fold_rmse,
-                )
 
             return float(np.mean(rmse_scores))
 
@@ -152,12 +105,7 @@ class ModelTrainer:
             show_progress_bar=True,
         )
 
-        best_params = study.best_trial.params
-        logger.info("Best trial RMSE: %.4f", study.best_value)
-        logger.info("Best params: %s", best_params)
-        return best_params
-
-    # -- Stage 2 -------------------------------------------------------------
+        return study.best_trial.params
 
     def train_final_model(
         self,
@@ -165,18 +113,6 @@ class ModelTrainer:
         best_params: dict[str, Any],
         splitter: TimeSplitter,
     ) -> lgb.LGBMRegressor:
-        """Stage 2: Train on full training data with best hyperparameters.
-
-        Uses the last CV fold as the early-stopping validation set.
-
-        Args:
-            train_df: Full training DataFrame (excluding holdout).
-            best_params: Hyperparameters from Stage 1.
-            splitter: TimeSplitter instance.
-
-        Returns:
-            Trained LGBMRegressor.
-        """
         X_full, y_full, _ = self._prepare_arrays(train_df)
         device = self._detect_gpu()
 
@@ -197,10 +133,6 @@ class ModelTrainer:
             **best_params,
         }
 
-        logger.info(
-            "Stage 2: training final model on %d rows, validating on %d",
-            len(y_tr), len(y_val),
-        )
         model = lgb.LGBMRegressor(**params)
         model.fit(
             X_tr, y_tr,
@@ -211,57 +143,27 @@ class ModelTrainer:
             ],
         )
 
-        val_pred = model.predict(X_val)
-        val_rmse = float(np.sqrt(mean_squared_error(y_val, val_pred)))
-        logger.info("Final model validation RMSE: %.4f", val_rmse)
         return model
-
-    # -- Evaluation ----------------------------------------------------------
 
     def evaluate_holdout(
         self, model: lgb.LGBMRegressor, holdout_df: pl.DataFrame
     ) -> dict[str, float]:
-        """Evaluate the final model on the time-separated holdout set.
-
-        Args:
-            model: Trained LGBMRegressor.
-            holdout_df: Holdout DataFrame.
-
-        Returns:
-            Dictionary of metric name -> value.
-        """
         X_hold, y_hold, _ = self._prepare_arrays(holdout_df)
         y_pred = model.predict(X_hold)
 
-        metrics = {
+        return {
             "rmse": float(np.sqrt(mean_squared_error(y_hold, y_pred))),
             "mae": float(mean_absolute_error(y_hold, y_pred)),
             "r2": float(r2_score(y_hold, y_pred)),
         }
-        logger.info(
-            "Holdout metrics: RMSE=$%.4f, MAE=$%.4f, R2=%.4f",
-            metrics["rmse"], metrics["mae"], metrics["r2"],
-        )
-        return metrics
-
-    # -- Persistence ---------------------------------------------------------
 
     def save(
         self, model: lgb.LGBMRegressor, config: Config, metrics: dict[str, float]
     ) -> None:
-        """Save model and config to disk.
-
-        Args:
-            model: Trained model.
-            config: Pipeline config snapshot.
-            metrics: Final holdout metrics.
-        """
         with open(config.model_save_path, "wb") as f:
             pickle.dump(model, f)
-        logger.info("Model saved to %s", config.model_save_path)
 
         config_dict = asdict(config)
         config_dict["holdout_metrics"] = metrics
         with open(config.config_save_path, "w") as f:
             json.dump(config_dict, f, indent=2, default=str)
-        logger.info("Config saved to %s", config.config_save_path)
