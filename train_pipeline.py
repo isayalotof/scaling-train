@@ -18,6 +18,8 @@ def run_pipeline() -> None:
 
     config = Config(data_paths=data_paths)
 
+    mlruns_dir = os.path.join(data_dir, "mlruns")
+    mlflow.set_tracking_uri(f"file:///{mlruns_dir}")
     mlflow.set_experiment("taxi_fare_prediction")
 
     with mlflow.start_run():
