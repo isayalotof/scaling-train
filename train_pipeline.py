@@ -18,6 +18,8 @@ def run_pipeline() -> None:
 
     config = Config(data_paths=data_paths)
 
+    db_path = os.path.join(data_dir, "mlflow.db").replace("\\", "/")
+    mlflow.set_tracking_uri(f"sqlite:///{db_path}")
     mlflow.set_experiment("taxi_fare_prediction")
 
     with mlflow.start_run():
