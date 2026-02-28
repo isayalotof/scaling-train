@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 import subprocess
+import warnings
 from dataclasses import asdict
 from typing import Any
 
@@ -14,6 +16,10 @@ import optuna
 import polars as pl
 from optuna.integration import LightGBMPruningCallback
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+logging.getLogger("mlflow.lightgbm").setLevel(logging.ERROR)
+logging.getLogger("mlflow.models.model").setLevel(logging.ERROR)
+logging.getLogger("mlflow.utils.environment").setLevel(logging.ERROR)
 
 from taxi_pipeline.config import Config
 from taxi_pipeline.splitter import TimeSplitter
@@ -101,11 +107,17 @@ class ModelTrainer:
             direction="minimize",
             study_name="taxi_fare_tuning",
         )
-        study.optimize(
-            objective,
-            n_trials=self._config.n_trials,
-            show_progress_bar=True,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="The reported value is ignored because this",
+                category=UserWarning,
+            )
+            study.optimize(
+                objective,
+                n_trials=self._config.n_trials,
+                show_progress_bar=True,
+            )
 
         best_params = study.best_trial.params
         mlflow.log_params({f"hp_{k}": v for k, v in best_params.items()})
@@ -175,6 +187,6 @@ class ModelTrainer:
             json.dump(config_dict, f, indent=2, default=str)
 
         mlflow.log_metrics(metrics)
-        mlflow.lightgbm.log_model(model, artifact_path="model")
+        mlflow.lightgbm.log_model(model, name="model")
         mlflow.log_artifact(config.model_save_path)
         mlflow.log_artifact(config.config_save_path)
