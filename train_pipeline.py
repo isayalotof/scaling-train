@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import mlflow
+
 from taxi_pipeline.config import Config
 from taxi_pipeline.data_processor import DataProcessor
 from taxi_pipeline.data_utils import resolve_data
@@ -16,20 +18,35 @@ def run_pipeline() -> None:
 
     config = Config(data_paths=data_paths)
 
-    processor = DataProcessor(config)
-    df = processor.load_and_optimize()
-    df = processor.sanity_check_and_clean(df)
-    df = processor.feature_engineering(df)
-    df = df.sort(config.datetime_column)
+    mlflow.set_experiment("taxi_fare_prediction")
 
-    splitter = TimeSplitter(config)
-    train_df, holdout_df = splitter.split_holdout(df)
+    with mlflow.start_run():
+        mlflow.log_params({
+            "months": ",".join(months),
+            "n_cv_splits": config.n_cv_splits,
+            "n_trials": config.n_trials,
+            "tuning_sample_fraction": config.tuning_sample_fraction,
+            "holdout_fraction": config.holdout_fraction,
+            "random_seed": config.random_seed,
+            "high_value_threshold": config.high_value_threshold,
+            "max_passengers": config.max_passengers,
+            "min_fare": config.min_fare,
+        })
 
-    trainer = ModelTrainer(config)
-    best_params = trainer.tune_hyperparameters(train_df, splitter)
-    model = trainer.train_final_model(train_df, best_params, splitter)
-    metrics = trainer.evaluate_holdout(model, holdout_df)
-    trainer.save(model, config, metrics)
+        processor = DataProcessor(config)
+        df = processor.load_and_optimize()
+        df = processor.sanity_check_and_clean(df)
+        df = processor.feature_engineering(df)
+        df = df.sort(config.datetime_column)
+
+        splitter = TimeSplitter(config)
+        train_df, holdout_df = splitter.split_holdout(df)
+
+        trainer = ModelTrainer(config)
+        best_params = trainer.tune_hyperparameters(train_df, splitter)
+        model = trainer.train_final_model(train_df, best_params, splitter)
+        metrics = trainer.evaluate_holdout(model, holdout_df)
+        trainer.save(model, config, metrics)
 
 
 if __name__ == "__main__":

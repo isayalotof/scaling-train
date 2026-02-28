@@ -7,6 +7,8 @@ from dataclasses import asdict
 from typing import Any
 
 import lightgbm as lgb
+import mlflow
+import mlflow.lightgbm
 import numpy as np
 import optuna
 import polars as pl
@@ -105,7 +107,11 @@ class ModelTrainer:
             show_progress_bar=True,
         )
 
-        return study.best_trial.params
+        best_params = study.best_trial.params
+        mlflow.log_params({f"hp_{k}": v for k, v in best_params.items()})
+        mlflow.log_metric("cv_best_rmse", study.best_trial.value)
+
+        return best_params
 
     def train_final_model(
         self,
@@ -167,3 +173,8 @@ class ModelTrainer:
         config_dict["holdout_metrics"] = metrics
         with open(config.config_save_path, "w") as f:
             json.dump(config_dict, f, indent=2, default=str)
+
+        mlflow.log_metrics(metrics)
+        mlflow.lightgbm.log_model(model, artifact_path="model")
+        mlflow.log_artifact(config.model_save_path)
+        mlflow.log_artifact(config.config_save_path)
